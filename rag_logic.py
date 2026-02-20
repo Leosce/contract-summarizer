@@ -7,7 +7,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings, ChatNVIDIA
 from langchain_chroma import Chroma
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.runnables import RunnablePassthrough, RunnableParallel
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
 from langchain_core.messages import HumanMessage, AIMessage
 from dotenv import load_dotenv
@@ -79,7 +79,6 @@ def process_uploaded_file(file_path):
     )
     return vectorstore.as_retriever()
 
-# %%
 def get_rag_chain(retriever):
     contextual_prompt = ChatPromptTemplate.from_messages([
         ("system", "You are a contract assistant. Use the context to answer the question."),
@@ -87,14 +86,24 @@ def get_rag_chain(retriever):
         ("human", "Context: {context}\n\nQuestion: {question}")
     ])
 
-    return (
-        RunnableParallel({
-            "context": itemgetter("question") | retriever | (lambda docs: "\n\n".join(d.page_content for d in docs)),
-            "question": itemgetter("question"),
-            "history": itemgetter("history")
+    def run_with_sources(inputs):
+        docs = retriever.invoke(inputs["question"])
+        context = "\n\n".join(d.page_content for d in docs)
+        
+        answer = (
+            contextual_prompt | llm | StrOutputParser()
+        ).invoke({
+            "context": context,
+            "question": inputs["question"],
+            "history": inputs["history"]
         })
-        | contextual_prompt 
-        | llm 
-        | StrOutputParser()
-    )
+
+        sources = "\n\n**Sources:**\n" + "\n".join(
+            f"- Page {d.metadata.get('page', '?')}: *{d.page_content[:100].strip()}...*"
+            for d in docs
+        )
+
+        return answer + sources
+
+    return RunnableLambda(run_with_sources)
 
