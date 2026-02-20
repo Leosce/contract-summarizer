@@ -1,2 +1,5 @@
 .env
 
+__pycache__/server.cpython-312.pyc
+__pycache__/rag_logic.cpython-312.pyc
+__pycache__/app.cpython-312.pyc

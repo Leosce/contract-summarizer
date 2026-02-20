@@ -1,52 +1,81 @@
 import gradio as gr
-from rag_logic import process_uploaded_file, guardrail_chain, get_rag_chain
+import requests
+import uvicorn
+from fastapi import FastAPI
+from langserve import RemoteRunnable
 
-# Global state to keep the retriever in memory
-current_retriever = None
+app = FastAPI(title="Smart Contract Assistant")
+
+# API Endpoints
+SERVER_URL = "http://localhost:9013"
+rag_chain = RemoteRunnable(f"{SERVER_URL}/generator/")
+guardrail_chain = RemoteRunnable(f"{SERVER_URL}/guardrail/")
 
 def handle_upload(file):
-    global current_retriever
-    if file:
-        try:
-            current_retriever = process_uploaded_file(file.name)
-            return "✅ Document processed! You can now ask questions."
-        except Exception as e:
-            return f"❌ Error processing file: {e}"
-    return "❌ Upload failed."
+    # If the user clears the file, 'file' becomes None
+    if file is None:
+        return "No document loaded."
+        
+    try:
+        # Simplified: Gradio's 'file' object has a .name attribute (the path)
+        with open(file.name, "rb") as f:
+            response = requests.post(
+                f"{SERVER_URL}/upload",
+                files={"file": (file.name, f)}
+            )
+        
+        if response.status_code == 200:
+            return f"{response.json().get('message', 'Processed')}"
+        return f"Server Error: {response.text}"
+        
+    except Exception as e:
+        return f"Connection Error: {e}"
+
+def get_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(c.get("text", "") for c in content if isinstance(c, dict))
+    return str(content)
 
 def chat_func(message, history):
-    global current_retriever
-    if not current_retriever:
-        return "Please upload a document (PDF/DOCX) first!"
-    
-    # Run Guardrail
-    guard_result = guardrail_chain.invoke({"question": message})
-    
-    # ADD THIS CHECK: Handle None or unexpected return types
-    if guard_result is None:
-        return "⚠️ Error: The guardrail could not process this request. Please try again."
-        
-    if not guard_result.is_relevant:
-        return f"⚠️ Guardrail: {guard_result.reasoning}"
-    
-    # Run RAG
-    chain = get_rag_chain(current_retriever)
-    return chain.invoke(message)
+    try:
+        guard = guardrail_chain.invoke({"question": message})
+        if not getattr(guard, 'is_relevant', True):
+            return f"Guardrail: {getattr(guard, 'reasoning', 'Topic not allowed.')}"
 
-# Removed theme from constructor
-with gr.Blocks() as demo:
-    gr.Markdown("# 📜 Smart Contract Assistant")
+        formatted_history = [
+            {"role": msg["role"], "content": get_text(msg["content"])}
+            for msg in history
+            if msg["role"] in ("user", "assistant")
+        ]
+
+        result = rag_chain.invoke({
+            "question": message,
+            "history": formatted_history
+        })
+
+        return str(result) if result else "No response generated."
+
+    except Exception as e:
+        return f"Error: {str(e)}"
     
+# Define the Interface
+with gr.Blocks(theme=gr.themes.Soft()) as demo:
+    gr.Markdown("#Smart Contract Assistant")
+
     with gr.Row():
         with gr.Column(scale=1):
-            file_upload = gr.File(label="Upload Contract", file_types=[".pdf", ".docx"])
+            file_upload = gr.File(label="Upload PDF/DOCX", file_types=[".pdf", ".docx"])
             status = gr.Textbox(label="Status", interactive=False)
-            file_upload.change(handle_upload, inputs=[file_upload], outputs=[status])
             
+            # This triggers on upload AND on clear
+            file_upload.change(handle_upload, inputs=file_upload, outputs=status)
+
         with gr.Column(scale=3):
-            # Removed 'type="messages"' to fix TypeError
             gr.ChatInterface(fn=chat_func)
 
+app = gr.mount_gradio_app(app, demo, path="/")
+
 if __name__ == "__main__":
-    # Moved theme here
-    demo.launch(theme=gr.themes.Soft())
+    uvicorn.run(app, host="0.0.0.0", port=9012)

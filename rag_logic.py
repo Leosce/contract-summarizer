@@ -1,15 +1,15 @@
 # %%
 import os
-import tempfile
+from operator import itemgetter
+from pydantic import BaseModel, Field
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings, ChatNVIDIA
 from langchain_chroma import Chroma
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough,RunnableAssign
-from langchain_core.output_parsers import StrOutputParser
-from operator import itemgetter
-from pydantic import BaseModel, Field
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables import RunnablePassthrough, RunnableParallel
+from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
+from langchain_core.messages import HumanMessage, AIMessage
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -40,11 +40,7 @@ Respond ONLY with a JSON object following this structure:
   "reasoning": "brief explanation"
 }}
 """
-# Ensure your template only expects {question}
-guardrail_prompt = ChatPromptTemplate.from_messages([
-    ("system", guardrail_system_prompt),
-    ("human", "{question}")
-])
+
 
 guardrail_llm = llm.with_structured_output(GuardrailOutput)
 guardrail_prompt = ChatPromptTemplate.from_messages([
@@ -58,19 +54,24 @@ guardrail_chain = guardrail_prompt | guardrail_llm
 
 # %%
 def process_uploaded_file(file_path):
-    # Handle both PDF and DOCX
-    if file_path.endswith('.pdf'):
+    if os.path.getsize(file_path) == 0:
+        raise ValueError("The uploaded file is empty or was not written correctly.")
+
+    # Case-insensitive extension check
+    ext = os.path.splitext(file_path)[1].lower()
+    
+    if ext == '.pdf':
         loader = PyPDFLoader(file_path)
-    elif file_path.endswith('.docx'):
+    elif ext == '.docx':
         loader = Docx2txtLoader(file_path)
     else:
-        raise ValueError("Unsupported file format.")
+        raise ValueError(f"Unsupported file format: {ext}")
     
     docs = loader.load()
+    
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     splits = text_splitter.split_documents(docs)
     
-    # Vector store setup
     vectorstore = Chroma.from_documents(
         documents=splits, 
         embedding=embedder,
@@ -80,17 +81,20 @@ def process_uploaded_file(file_path):
 
 # %%
 def get_rag_chain(retriever):
-    prompt = ChatPromptTemplate.from_template("""
-    Answer strictly based on the context: {context}
-    Question: {question}
-    """)
-    
+    contextual_prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are a contract assistant. Use the context to answer the question."),
+        MessagesPlaceholder(variable_name="history"),
+        ("human", "Context: {context}\n\nQuestion: {question}")
+    ])
+
     return (
-        {"context": retriever | (lambda docs: "\n\n".join(d.page_content for d in docs)), 
-         "question": RunnablePassthrough()}
-        | prompt 
+        RunnableParallel({
+            "context": itemgetter("question") | retriever | (lambda docs: "\n\n".join(d.page_content for d in docs)),
+            "question": itemgetter("question"),
+            "history": itemgetter("history")
+        })
+        | contextual_prompt 
         | llm 
         | StrOutputParser()
     )
-
 
