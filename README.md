@@ -54,5 +54,5 @@ http://localhost:9012
 ## Usage
 
 1. Upload a PDF or DOCX file using the left panel
-2. Wait for the ✅ confirmation message
+2. Wait for the confirmation message
 3. Start chatting with the document in the chat panel
